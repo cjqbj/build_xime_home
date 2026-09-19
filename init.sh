@@ -1,9 +1,51 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+# ============================================================
+# 参数解析
+#   $1 = ghp          GitHub Personal Access Token (必需)
+#   $2 = github_user  GitHub 用户名 (可选, 默认 cjqbj)
+#   剩余参数原样传给 debug.sh
+# ============================================================
+GHP="${1:-}"
+if [[ -z "$GHP" ]]; then
+    cat >&2 <<'EOF'
+错误: 缺少必需参数 <ghp>
+
+用法:
+    ./init.sh <ghp> [github_user] [debug.sh 参数...]
+
+参数:
+    ghp          GitHub Personal Access Token (必需)
+    github_user  GitHub 用户名 (可选, 默认: cjqbj)
+
+示例:
+    ./init.sh ghp_xxxxxxxxxxxxxxxxxxxx
+    ./init.sh ghp_xxxxxxxxxxxxxxxxxxxx myname
+    ./init.sh ghp_xxxxxxxxxxxxxxxxxxxx myname release
+EOF
+    exit 1
+fi
+shift   # 吃掉 ghp
+
+GH_USER="cjqbj"
+if [[ $# -gt 0 ]]; then
+    GH_USER="$1"
+    shift
+fi
+
+export GHP GH_USER
+
+# 统一认证前缀，所有 GitHub URL 复用
+GIT_CRED="${GH_USER}:${GHP}"
+
+echo "GitHub 用户: $GH_USER"
+
+# ============================================================
+# Codespaces hook 处理
+# ============================================================
 disable_codespaces_hook() {
     local hook_path="${1:-}"
     [[ -n "$hook_path" ]] || return 0
@@ -40,26 +82,43 @@ if command -v git >/dev/null 2>&1 && git lfs version >/dev/null 2>&1; then
     git lfs install --local || true
 fi
 
-# 对这个 bootstrap 仓库，不需要执行普通 git pull；
-# 远端分支可能和本地存在轻微分叉，直接 pull 会因为“需要指定合并策略”而失败。
-# 改为显式 fetch + reset --hard + clean，此时本地细微修改会被忽略，按远端 main 精确同步。
-if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "同步仓库到 origin/main（忽略本地细微修改）..."
-    git -C "$ROOT_DIR" fetch --all --tags --prune || true
-    git -C "$ROOT_DIR" remote set-url origin https://github.com/775cpu/build_xime_home.git 2>/dev/null || true
-    git -C "$ROOT_DIR" checkout -B main origin/main 2>/dev/null || git -C "$ROOT_DIR" checkout main 2>/dev/null || true
-    git -C "$ROOT_DIR" reset --hard origin/main 2>/dev/null || git -C "$ROOT_DIR" reset --hard HEAD 2>/dev/null || true
-    git -C "$ROOT_DIR" clean -fdx 2>/dev/null || true
-    git -C "$ROOT_DIR" lfs pull 2>/dev/null || true
-fi
+# ============================================================
+# 通用 clone 包装：任何失败只警告，不打断
+# ============================================================
+try_clone() {
+    # 用法: try_clone <cmd...>
+    echo "▶ $*"
+    if "$@"; then
+        return 0
+    else
+        echo "警告: clone 失败或目标已存在，继续执行: $*" >&2
+        return 0
+    fi
+}
 
-git clone https://github.com/wxsb-web/multi_mqtt
+# ============================================================
+# 拉取主仓库 / 子仓库（统一使用同一个 ghp + user）
+# ============================================================
+./git.py pull -v 3 "https://${GIT_CRED}@github.com/${GH_USER}/build_xime_home" || {
+    echo "警告: 主仓库 pull 失败，继续。" >&2
+}
+#git lfs pull
 
 # 这是真正需要拉取/构建的项目代码，不要在上层仓库里反复执行全量 git pull。
-./git.py clone --depth=1 https://github.com/775cpu/Xime_rpc
 
-cd Xime_rpc
-#git submodule update --init --recursive
-echo 第一次执行耗时约8分钟，后续执行耗时约几秒钟
-./build.sh "$@"
+# multi_mqtt
+try_clone git clone https://github.com/wxsb-web/multi_mqtt
 
+# xime
+xime_repo="xime"
+try_clone ./git.py clone --depth=1 -b main "https://${GIT_CRED}@github.com/${GH_USER}/${xime_repo}"
+
+if [[ -d "$xime_repo" ]]; then
+    cd "$xime_repo"
+    #git submodule update --init --recursive
+    echo "第一次执行耗时约 2+11 分钟，后续执行耗时约几十秒钟"
+    ./debug_build_secexp.sh  "$@"
+else
+    echo "错误: 目录不存在，无法进入并执行 debug_build_secexp.sh: $xime_repo" >&2
+    exit 1
+fi
