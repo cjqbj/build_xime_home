@@ -1,6 +1,7 @@
-# =========================
-# Editor and container state
-# =========================
+client_mqtt/
+multi_mqtt/
+Xime_rpc/
+
 .vscode-remote/
 .devcontainer/.cache/
 
